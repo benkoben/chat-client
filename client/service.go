@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"time"
-    "encoding/json"
 )
 
 type chatService struct {
@@ -43,14 +41,33 @@ func NewChatService(options ...Option) (*chatService, error) {
 connect establishes a connection with endpoint and returns an error if unsuccessful.
 if successful the connection is saved to the chatService.Connections instance
 */
-func (c *chatService) connect() error {
+func (c *chatService) connect(user string) error {
 	conn, err := c.Dialer.Dial(c.endpoint.protocol, c.endpoint.String())
 	if err != nil {
 		return fmt.Errorf("could not connect to %s://%s: %s", c.endpoint.protocol, c.endpoint.String(), err)
 	}
 
-	c.conn = conn
+    helloMsg := newRawHelloMsg(user)
+    fmt.Println(string(helloMsg))
+    if _, err := conn.Write(helloMsg); err != nil {
+        return fmt.Errorf("could not send hello message:", err)
+    }
 
+    buffer := make([]byte, c.connBufferSize) 
+
+    // TODO: We might have to implement a timeout here
+    n, err := conn.Read(buffer)
+    if err != nil {
+        return fmt.Errorf("could not read message from the server: %s", err)
+    }
+
+    ok, msgType := isHello(buffer[:n])
+    if !ok {
+        return fmt.Errorf("could not perform handshake, expected hello type message but received %s type", msgType)
+    }
+
+    fmt.Println("connected to", c.endpoint)
+    c.conn = conn
 	return nil
 }
 
@@ -65,18 +82,8 @@ func (c *chatService) transmit(name string, body []byte) error {
     if len(body) == 0 {
         return fmt.Errorf("rawString cannot be empty")
     }
-
-    msg := &Message{
-        Timestamp: time.Now().Format(time.RFC850),
-        Author: name,
-        Body: string(body),
-    }
-
-    rawStr, err := json.Marshal(msg)
-
-    if err != nil {
-        return fmt.Errorf("could not marshal message into byte slice: ", err)
-    }
+    
+    rawStr := newRawMsg(name, string(body))
     
     c.conn.Write(rawStr)
 
@@ -84,7 +91,7 @@ func (c *chatService) transmit(name string, body []byte) error {
 }
 
 /*
-receive dispatches any incoming messages to a consumer. A consumer might be a screen output or something...
+receive dispatches any incoming messages the service channel
 */
 func (c *chatService) receive() {
 	defer close(c.serviceChan)

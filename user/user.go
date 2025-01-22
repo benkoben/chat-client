@@ -42,5 +42,5 @@ func (u *User) Login() {
 		return
 	}
 
-	u.Name = name
+	u.Name = strings.Split(name, "\n")[0]
 }

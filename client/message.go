@@ -1,7 +1,9 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Messages can be
@@ -40,3 +42,49 @@ type Message struct {
 func (m Message) String() string {
     return fmt.Sprintf("%s - %s: %s\n", m.Timestamp, m.Author, m.Body)
 }
+
+// returns a raw byte slice of an Hello type message
+func newRawHelloMsg(author string) []byte {
+    m := Message{
+        Timestamp: time.Now().Format(time.RFC850),
+        Author: author,
+        Type: msgTypeHello,
+    }
+    rawMsg, _ := json.Marshal(m)
+    return rawMsg
+}
+
+func newRawMsg(name, body string) []byte{
+    m := Message{
+        Author: name,
+        Body: body,
+        Timestamp: time.Now().Format(time.RFC850),
+        Type: msgTypeMessage,
+    }
+    rawMsg, _ := json.Marshal(m)
+    return rawMsg
+}
+
+func unmarshalMessage(data []byte) (*Message, error) {
+   var msg Message
+   err := json.Unmarshal(data, &msg) 
+   if err != nil {
+       return nil, fmt.Errorf("could not unmarshal incoming message:", err)
+   }
+
+   return &msg, nil
+}
+
+func isHello(in []byte) (bool, messageType) {
+    var m Message
+    if err := json.Unmarshal(in, &m); err != nil {
+        return false, m.Type
+    }
+
+    if m.Type == msgTypeHello {
+        return true, m.Type
+    }
+
+    return false, m.Type
+}
+

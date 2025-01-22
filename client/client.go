@@ -6,7 +6,6 @@ import (
     "os/signal"
 	"sync"
 	"syscall"
-    "encoding/json"
 )
 
 /*
@@ -69,7 +68,7 @@ func (c client) Start() error {
 	defer close(quit)
 
 	fmt.Println("Connecting to", c.svc.endpoint)
-	if err := c.svc.connect(); err != nil {
+	if err := c.svc.connect(c.name); err != nil {
 		return err
 	}
 
@@ -82,11 +81,14 @@ func (c client) Start() error {
 			wg.Add(1)
 			go func(data []byte) {
 				defer wg.Done()
-                var msg Message
-                err := json.Unmarshal(data, &msg) 
+
+                msg, err := unmarshalMessage(data)
                 if err != nil {
-                    fmt.Println("could not unmarshal incoming message:", err)
+                    fmt.Printf("could not read message: %s\n")
+                    return
                 }
+                // Quick and dirty stdout
+                // Here we eventually will add more fancy rendering stuff
 				fmt.Println(msg)
 			}(rawMsg)
 
