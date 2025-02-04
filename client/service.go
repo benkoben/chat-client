@@ -1,9 +1,19 @@
 package client
 
 import (
+    "strings"
 	"fmt"
-	"io"
 	"net"
+    "bufio"
+    "log"
+    "io"
+    "os"
+    "sync"
+)
+
+const (
+    defaultConcurrency = 1
+    defaultConnBufferSize = 1<<10
 )
 
 type chatService struct {
@@ -11,9 +21,10 @@ type chatService struct {
 	endpoint       *endpoint
 	conn           net.Conn
 	connBufferSize int
+    concurrency int
 
-	serviceChan chan []byte
-	quit        *chan struct{}
+	inboundCh chan []byte
+	quit        chan struct{}
 }
 
 type Option func(*chatService)
@@ -21,8 +32,12 @@ type Option func(*chatService)
 func NewChatService(options ...Option) (*chatService, error) {
 
 	svc := chatService{
-		serviceChan: make(chan []byte),
+		inboundCh: make(chan []byte, 0), // Capacity is dynamically adjusted
+        quit: make(chan struct{}, 1),
+        concurrency: defaultConcurrency,
+        connBufferSize: defaultConnBufferSize,
 	}
+
 	// Apply all
 	for _, opt := range options {
 		opt(&svc)
@@ -48,7 +63,6 @@ func (c *chatService) connect(user string) error {
 	}
 
     helloMsg := newRawHelloMsg(user)
-    fmt.Println(string(helloMsg))
     if _, err := conn.Write(helloMsg); err != nil {
         return fmt.Errorf("could not send hello message:", err)
     }
@@ -66,60 +80,124 @@ func (c *chatService) connect(user string) error {
         return fmt.Errorf("could not perform handshake, expected hello type message but received %s type", msgType)
     }
 
-    fmt.Println("connected to", c.endpoint)
+    log.Print("Connected!")
     c.conn = conn
 	return nil
 }
 
+// Implement fan-out pattern
+// Whenever a message is received on the outboundCh then create a transmitter worker
+
+func (c chatService) outboundDispatcher(username string){
+    outCh := make(chan []byte, 100)
+    var wg sync.WaitGroup
+    
+    wg.Add(1)
+    // Read Stdin 
+    go func(){
+        defer wg.Done()
+        for {
+            chunk := make([]byte, c.connBufferSize)
+            select {
+                case <- c.quit:
+                    return
+                default:
+                    reader := bufio.NewReader(os.Stdin)
+                    n, err := reader.Read(chunk)
+                    if err != nil {
+                        log.Printf("could not read from %v: %s", os.Stdin, err)
+                    }
+
+                    // TODO: There is probably a better way to do this
+                    rawMsg := chunk[:n]
+                    outCh <- []byte(strings.TrimSuffix(string(rawMsg), "\n"))
+                    continue
+            }
+        }
+    }()
+
+    for i:=0;i<c.concurrency;i++ {
+        wg.Add(1)
+        go transmit(username, outCh, c.conn, &wg, &c.quit)
+    } 
+
+    wg.Wait()
+}
+
 /*
-sends a message over an established connection
+transmit is the consumer of the outboundCh. It transforms inbound []byte into a message before writing that to c.conn
+if any error occurs during this time it will be logged to stdout.
 */
-func (c *chatService) transmit(name string, body []byte) error {
-    if name == "" {
-        return fmt.Errorf("name cannot be empty")
-    }
-
-    if len(body) == 0 {
-        return fmt.Errorf("rawString cannot be empty")
-    }
+func transmit(name string, outCh <-chan []byte, conn net.Conn, wg *sync.WaitGroup, quit *chan struct{}) {
+    // Note to self: I want to try out having pointer to quit and wg. 
+    // If that does not work then we can just do a anonymous go routine like I did for reading stdin
     
-    rawStr := newRawMsg(name, string(body))
-    
-    c.conn.Write(rawStr)
+    defer wg.Done()
+    for {
+        select {
+            case <- *quit:
+                return
+            case body := <-outCh:
+                msg := newRawMsg(name, string(body))
 
-    return nil
+                _, err := conn.Write(msg)
+                if err != nil {
+                    log.Printf("could not write to connection: %s", err)
+                }
+        }
+    }
 }
 
 /*
 receive dispatches any incoming messages the service channel
 */
 func (c *chatService) receive() {
-	defer close(c.serviceChan)
-
-	buffer := make([]byte, c.connBufferSize)
 	for {
 		select {
-		case <-*c.quit:
+		case <-c.quit:
 			return
 		default:
-			n, err := c.conn.Read(buffer)
-			if err != nil {
-				if err == io.EOF {
-					fmt.Printf("end of data stream reached")
-				} else {
-					fmt.Printf("could not read data: %v\n", err)
-				}
-				return
-			}
-			msg := buffer[:n]
-			c.serviceChan <- msg
+            // Read the data from the packet
+            reader := bufio.NewReader(c.conn)
+            chunk := make([]byte, c.connBufferSize)
+            n, err := reader.Read(chunk)
+
+            // Whenever an error happens 
+            if err != nil {
+
+                // If the server closes the connection
+                if err == io.EOF {
+                    log.Print("Server closed connection")
+                    c.quit<-struct{}{}
+                    // TODO: Initiate cleanups
+                }
+                continue
+            }
+
+            // Add the data to the message buffer
+            msg := chunk[:n]
+            c.inboundCh <- msg
 		}
 	}
 }
 
-func (c *chatService) close() {
+/*
+Send a messageTypeBye message to the server, letting it know that the client will terminate the connection
+*/
+func (c *chatService) close(user string) {
+    c.quit <- struct{}{}
+    // Send a bye type message to the server
+    byeMsg, err := newRawSystemMsg(user, msgTypeBye)
+    if err != nil {
+        log.Print(err)
+    }
+    log.Print("Sending bye to server")
+    c.conn.Write(byeMsg)
+
+    log.Print("Closing connection...")
+    // Terminate the connection and service instance
 	c.conn.Close()
-	close(c.serviceChan)
+	close(c.inboundCh)
 }
 
 func WithEndpoint(endpoint *endpoint) Option {
@@ -131,5 +209,11 @@ func WithEndpoint(endpoint *endpoint) Option {
 func WithBufferSize(bufferSize int) Option {
 	return func(cs *chatService) {
 		cs.connBufferSize = bufferSize
+	}
+}
+
+func WithConcurrency(concurrency int) Option {
+	return func(cs *chatService) {
+		cs.concurrency = concurrency
 	}
 }

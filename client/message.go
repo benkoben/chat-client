@@ -26,6 +26,8 @@ func (m messageType)String()string{
             mType = "message"
         case m == 2:
             mType = "bye"
+        default:
+            mType = "unknown"
     }
 
     return mType
@@ -52,6 +54,20 @@ func newRawHelloMsg(author string) []byte {
     }
     rawMsg, _ := json.Marshal(m)
     return rawMsg
+}
+
+// returns a raw byte slice of an bye type message
+func newRawSystemMsg(author string, t messageType) ([]byte, error) {
+    // TODO: Add validators here
+
+    m := Message{
+        Timestamp: time.Now().Format(time.RFC850),
+        Author: author,
+        Type: t,
+    }
+
+    rawMsg, _ := json.Marshal(m)
+    return rawMsg, nil
 }
 
 func newRawMsg(name, body string) []byte{
