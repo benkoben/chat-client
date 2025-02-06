@@ -59,48 +59,23 @@ func (c client) Start() error {
 	if err := c.svc.connect(c.name); err != nil {
 		return err
 	}
+    
+    // Watch for SIGNINT and SIGTERM signals
+    go func(){
+        for {
+            select {
+                case sig:=<-quit:
+                    fmt.Println()
+                    fmt.Println(sig)
 
-	go c.svc.receive()
-    go c.svc.outboundDispatcher(c.name)
-
-    // I think it makes more sense to move this part into the service
-    // because we are reading from the service channel.
-    // 
-    // It does not feel that having it here provides more value.
-    // What do do instead:
-    // - Launch two go routines, transmit and receive.
-    // - Wait use wait groups to wait and if a quit signal comes in we close
-    //   signal these go routines to cleanup
-	for {
-		select {
-		case rawMsg := <-c.svc.inboundCh:
-            msg, err := unmarshalMessage(rawMsg)
-
-            if err != nil {
-                fmt.Printf("could not read message: %s\n")
-                continue
+                    c.svc.close(c.name)
+                    return
             }
-            // Quick and dirty stdout
-            // Here we eventually will add more fancy rendering stuff
-            fmt.Println(msg)
-
-		case sig := <-quit:
-			fmt.Println()
-			fmt.Println(sig)
-
-            // close all service go routines and connection
-            c.svc.close(c.name)
-
-            // Stop chat service
-			c.stop()
-			return nil
-		}
-	}
+        }
+    }()
+    
+    // start service
+    c.svc.start(c.name)
 
     return nil
-}
-
-func (c client) stop() {
-	fmt.Println("Stopping chatService...")
-	return
 }

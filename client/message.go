@@ -17,6 +17,21 @@ const (
 
 type messageType int
 
+/*
+messageBus is a buffered channel used by workers to receive and process messages
+*/
+type messageBus chan *Message
+
+func newMessageBus(size int) *messageBus {
+    if size == 0 {
+        // Ensure that the messageBus is always a buffered channel
+        size = 1 
+    }
+
+    var mb messageBus = make(chan *Message, size)
+    return &mb
+}
+
 func (m messageType)String()string{
     var mType string
     switch {
@@ -43,6 +58,11 @@ type Message struct {
 // Formats a message into a readable format. Omits the type field in the return value
 func (m Message) String() string {
     return fmt.Sprintf("%s - %s: %s\n", m.Timestamp, m.Author, m.Body)
+}
+
+// Just a simple wrapper method around json.Marshall
+func (m Message) Bytes() ([]byte, error) {
+    return json.Marshal(m)
 }
 
 // returns a raw byte slice of an Hello type message
@@ -81,11 +101,20 @@ func newRawMsg(name, body string) []byte{
     return rawMsg
 }
 
+func newMsg(name, body string) *Message {
+    return &Message{
+        Author: name,
+        Body: body,
+        Timestamp: time.Now().Format(time.RFC850),
+        Type: msgTypeMessage,
+    }
+}
+
 func unmarshalMessage(data []byte) (*Message, error) {
    var msg Message
    err := json.Unmarshal(data, &msg) 
    if err != nil {
-       return nil, fmt.Errorf("could not unmarshal incoming message:", err)
+       return nil, fmt.Errorf("message: could not unmarshal data", err)
    }
 
    return &msg, nil

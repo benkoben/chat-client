@@ -1,5 +1,9 @@
 package client
 
+// TOOD:
+// - Fix bux where quit signalling does not properly work
+// - Fix bug where inbound network connections are not written to stdout
+
 import (
     "strings"
 	"fmt"
@@ -12,8 +16,9 @@ import (
 )
 
 const (
-    defaultConcurrency = 1
-    defaultConnBufferSize = 1<<10
+    defaultConcurrency       = 1
+    defaultConnBufferSize    = 1<<10
+    defaultChannelBufferSize = 20
 )
 
 type chatService struct {
@@ -21,9 +26,10 @@ type chatService struct {
 	endpoint       *endpoint
 	conn           net.Conn
 	connBufferSize int
-    concurrency int
+    concurrency    int
 
-	inboundCh chan []byte
+	inboundCh   *messageBus
+	outboundCh  *messageBus
 	quit        chan struct{}
 }
 
@@ -32,10 +38,11 @@ type Option func(*chatService)
 func NewChatService(options ...Option) (*chatService, error) {
 
 	svc := chatService{
-		inboundCh: make(chan []byte, 0), // Capacity is dynamically adjusted
         quit: make(chan struct{}, 1),
         concurrency: defaultConcurrency,
         connBufferSize: defaultConnBufferSize,
+        inboundCh: newMessageBus(defaultChannelBufferSize),
+        outboundCh: newMessageBus(defaultChannelBufferSize),
 	}
 
 	// Apply all
@@ -82,24 +89,72 @@ func (c *chatService) connect(user string) error {
 
     log.Print("Connected!")
     c.conn = conn
+
 	return nil
 }
 
-// Implement fan-out pattern
-// Whenever a message is received on the outboundCh then create a transmitter worker
+/*
+start acts as an entry point to all of the go routine dispatching logic.
+for reading data sources one go routine is created per source (stdin & c.conn) for asychonisity purposes.
 
-func (c chatService) outboundDispatcher(username string){
-    outCh := make(chan []byte, 100)
+workers that write to destinations are dispatched according to c.concurrency.
+
+start also owns the responsibility of closing all channels once all go rountes have returned. This should only happen
+when quit is signalled.
+*/
+func (c chatService) start(username string) {
     var wg sync.WaitGroup
+
+    defer close(*c.inboundCh)
+    defer log.Print("closing inboundChannel")
+
+    defer close(*c.outboundCh)
+    defer log.Print("closing outboundChannel")
     
+    // Start ConnectionReader
+    go func(){
+	    for {
+	    	select {
+	    	case <-c.quit:
+                log.Println("connection reader returning...")
+	    		return
+	    	default:
+                // Read the data from the packet
+                reader := bufio.NewReader(c.conn)
+                chunk := make([]byte, c.connBufferSize)
+                n, err := reader.Read(chunk)
+
+                // Whenever an error happens 
+                if err != nil {
+
+                    // If the server closes the connection
+                    if err == io.EOF {
+                        log.Print("Server closed connection")
+                        c.quit<-struct{}{}
+                    }
+                    continue
+                }
+                
+                m, err := unmarshalMessage(chunk[:n])
+                if err != nil {
+                    log.Print(err)
+                    continue
+                }
+                log.Printf("received %d bytes from server", n)
+                *c.inboundCh <- m
+	    	}
+	    }
+    }()
+
+    // Start a StdinReader
     wg.Add(1)
-    // Read Stdin 
     go func(){
         defer wg.Done()
         for {
             chunk := make([]byte, c.connBufferSize)
             select {
                 case <- c.quit:
+                log.Println("stdin reader returning...")
                     return
                 default:
                     reader := bufio.NewReader(os.Stdin)
@@ -107,78 +162,62 @@ func (c chatService) outboundDispatcher(username string){
                     if err != nil {
                         log.Printf("could not read from %v: %s", os.Stdin, err)
                     }
-
-                    // TODO: There is probably a better way to do this
-                    rawMsg := chunk[:n]
-                    outCh <- []byte(strings.TrimSuffix(string(rawMsg), "\n"))
-                    continue
+                    m := newMsg(username, strings.TrimSuffix(string(chunk[:n]), "\n"))
+                    *c.outboundCh <- m
             }
         }
     }()
 
-    for i:=0;i<c.concurrency;i++ {
-        wg.Add(1)
-        go transmit(username, outCh, c.conn, &wg, &c.quit)
-    } 
+    // Reads from outbound channel and writes to net.Conn
+    log.Print("Starting connectionWriter")
+    connectionWriter := worker(writer) 
+    c.dispatch(connectionWriter, username, c.outboundCh, c.conn, &wg)
 
+    // Reads from inbound channel and writes to os.Stdout
+    log.Print("Starting stdoutWriter")
+    stdoutWriter := worker(writer) 
+    c.dispatch(stdoutWriter, username, c.inboundCh, os.Stdout, &wg)
+
+    log.Print("all workers spawned")
     wg.Wait()
 }
 
-/*
-transmit is the consumer of the outboundCh. It transforms inbound []byte into a message before writing that to c.conn
-if any error occurs during this time it will be logged to stdout.
-*/
-func transmit(name string, outCh <-chan []byte, conn net.Conn, wg *sync.WaitGroup, quit *chan struct{}) {
-    // Note to self: I want to try out having pointer to quit and wg. 
-    // If that does not work then we can just do a anonymous go routine like I did for reading stdin
-    
-    defer wg.Done()
-    for {
-        select {
-            case <- *quit:
-                return
-            case body := <-outCh:
-                msg := newRawMsg(name, string(body))
+type worker func(string, *messageBus, io.Writer, *sync.WaitGroup, *chan struct{})
 
-                _, err := conn.Write(msg)
-                if err != nil {
-                    log.Printf("could not write to connection: %s", err)
-                }
-        }
+func (c chatService)dispatch(w worker, name string, source *messageBus, dest io.Writer, wg *sync.WaitGroup) {
+    for i:=0;i<c.concurrency;i++ {
+        wg.Add(1)
+        go w(name, source, dest, wg, &c.quit)
     }
 }
 
-/*
-receive dispatches any incoming messages the service channel
-*/
-func (c *chatService) receive() {
-	for {
-		select {
-		case <-c.quit:
-			return
-		default:
-            // Read the data from the packet
-            reader := bufio.NewReader(c.conn)
-            chunk := make([]byte, c.connBufferSize)
-            n, err := reader.Read(chunk)
+func writer(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit *chan struct{}) {
+    defer wg.Done()
 
-            // Whenever an error happens 
-            if err != nil {
-
-                // If the server closes the connection
-                if err == io.EOF {
-                    log.Print("Server closed connection")
-                    c.quit<-struct{}{}
-                    // TODO: Initiate cleanups
+    for {
+        select {
+            case msg, ok := <-*bus:
+                if !ok {
+                    log.Print("worker could not read from closed channel")
+                    log.Print("attempting to gracefully shutdown...")
+                    *quit<-struct{}{}
                 }
-                continue
-            }
-
-            // Add the data to the message buffer
-            msg := chunk[:n]
-            c.inboundCh <- msg
-		}
-	}
+                rawMsg, err := msg.Bytes()
+                if err != nil {
+                    log.Printf("worker could not unmarshal recieved message: %s", err)
+                    continue
+                }
+                 
+                // TODO: Perhaps we should treat this as a transient error
+                log.Printf("worker: writing message to %T", w)
+                if _, err := w.Write(rawMsg); err != nil {
+                    log.Printf("could not write to %T: %s", w, err)
+                }
+            case <- *quit:
+                log.Print("worker returning...")
+                return
+        }
+    }
 }
 
 /*
@@ -197,7 +236,6 @@ func (c *chatService) close(user string) {
     log.Print("Closing connection...")
     // Terminate the connection and service instance
 	c.conn.Close()
-	close(c.inboundCh)
 }
 
 func WithEndpoint(endpoint *endpoint) Option {
