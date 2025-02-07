@@ -5,7 +5,6 @@ import (
     "os" 
     "os/signal"
 	"syscall"
-    "log"
 )
 
 /*
@@ -55,7 +54,7 @@ func (c client) Start() error {
 
 	defer close(quit)
 
-	log.Print("Connecting to", c.svc.endpoint)
+	fmt.Println("Connecting to", c.svc.endpoint)
 	if err := c.svc.connect(c.name); err != nil {
 		return err
 	}
@@ -64,10 +63,7 @@ func (c client) Start() error {
     go func(){
         for {
             select {
-                case sig:=<-quit:
-                    fmt.Println()
-                    fmt.Println(sig)
-
+                case <-quit:
                     c.svc.close(c.name)
                     return
             }
@@ -76,6 +72,8 @@ func (c client) Start() error {
     
     // start service
     c.svc.start(c.name)
+
+    fmt.Println("Goodbye", c.name)
 
     return nil
 }

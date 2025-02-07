@@ -39,8 +39,6 @@ func (m messageType)String()string{
             mType = "hello"
         case m == 1:
             mType = "message"
-        case m == 2:
-            mType = "bye"
         default:
             mType = "unknown"
     }
@@ -63,6 +61,11 @@ func (m Message) String() string {
 // Just a simple wrapper method around json.Marshall
 func (m Message) Bytes() ([]byte, error) {
     return json.Marshal(m)
+}
+
+// Format message into a byte slice containing a human readable formatted message
+func (m Message) BytesF() []byte {
+    return []byte(m.String())
 }
 
 // returns a raw byte slice of an Hello type message

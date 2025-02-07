@@ -3,6 +3,7 @@ package client
 // TOOD:
 // - Fix bux where quit signalling does not properly work
 // - Fix bug where inbound network connections are not written to stdout
+// - Add timeouts to connections (server side), or perhaps a keepalive mechanism to determine wether or not a connection is active
 
 import (
     "strings"
@@ -16,7 +17,7 @@ import (
 )
 
 const (
-    defaultConcurrency       = 1
+    defaultConcurrency       = 2
     defaultConnBufferSize    = 1<<10
     defaultChannelBufferSize = 20
 )
@@ -30,15 +31,15 @@ type chatService struct {
 
 	inboundCh   *messageBus
 	outboundCh  *messageBus
-	quit        chan struct{}
+	quit        *chan bool // Entrypoint from client to chatService SIGTERM or SIGINT signals are received
 }
 
 type Option func(*chatService)
 
 func NewChatService(options ...Option) (*chatService, error) {
-
+    quit := make(chan bool)
 	svc := chatService{
-        quit: make(chan struct{}, 1),
+        quit: &quit,
         concurrency: defaultConcurrency,
         connBufferSize: defaultConnBufferSize,
         inboundCh: newMessageBus(defaultChannelBufferSize),
@@ -87,7 +88,6 @@ func (c *chatService) connect(user string) error {
         return fmt.Errorf("could not perform handshake, expected hello type message but received %s type", msgType)
     }
 
-    log.Print("Connected!")
     c.conn = conn
 
 	return nil
@@ -103,20 +103,18 @@ start also owns the responsibility of closing all channels once all go rountes h
 when quit is signalled.
 */
 func (c chatService) start(username string) {
-    var wg sync.WaitGroup
+    wg := sync.WaitGroup{}
 
     defer close(*c.inboundCh)
-    defer log.Print("closing inboundChannel")
-
     defer close(*c.outboundCh)
-    defer log.Print("closing outboundChannel")
     
     // Start ConnectionReader
+    wg.Add(1)
     go func(){
+        defer wg.Done()
 	    for {
 	    	select {
-	    	case <-c.quit:
-                log.Println("connection reader returning...")
+	    	case <-*c.quit:
 	    		return
 	    	default:
                 // Read the data from the packet
@@ -130,7 +128,7 @@ func (c chatService) start(username string) {
                     // If the server closes the connection
                     if err == io.EOF {
                         log.Print("Server closed connection")
-                        c.quit<-struct{}{}
+                        *c.quit<-true
                     }
                     continue
                 }
@@ -140,7 +138,6 @@ func (c chatService) start(username string) {
                     log.Print(err)
                     continue
                 }
-                log.Printf("received %d bytes from server", n)
                 *c.inboundCh <- m
 	    	}
 	    }
@@ -153,8 +150,7 @@ func (c chatService) start(username string) {
         for {
             chunk := make([]byte, c.connBufferSize)
             select {
-                case <- c.quit:
-                log.Println("stdin reader returning...")
+                case <-*c.quit:
                     return
                 default:
                     reader := bufio.NewReader(os.Stdin)
@@ -169,52 +165,53 @@ func (c chatService) start(username string) {
     }()
 
     // Reads from outbound channel and writes to net.Conn
-    log.Print("Starting connectionWriter")
-    connectionWriter := worker(writer) 
-    c.dispatch(connectionWriter, username, c.outboundCh, c.conn, &wg)
+    for i:=0;i<c.concurrency;i++ {
+        wg.Add(1)
+        go worker(username, c.outboundCh, c.conn, &wg, c.quit)
+    }
 
     // Reads from inbound channel and writes to os.Stdout
-    log.Print("Starting stdoutWriter")
-    stdoutWriter := worker(writer) 
-    c.dispatch(stdoutWriter, username, c.inboundCh, os.Stdout, &wg)
+    for i:=0;i<c.concurrency;i++ {
+        wg.Add(1)
+        go worker(username, c.inboundCh, os.Stdout, &wg, c.quit)
+    }
 
-    log.Print("all workers spawned")
+    fmt.Println("Connected!")
+    fmt.Println()
     wg.Wait()
 }
 
-type worker func(string, *messageBus, io.Writer, *sync.WaitGroup, *chan struct{})
-
-func (c chatService)dispatch(w worker, name string, source *messageBus, dest io.Writer, wg *sync.WaitGroup) {
-    for i:=0;i<c.concurrency;i++ {
-        wg.Add(1)
-        go w(name, source, dest, wg, &c.quit)
-    }
-}
-
-func writer(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit *chan struct{}) {
+func worker(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit *chan bool) {
     defer wg.Done()
-
     for {
         select {
             case msg, ok := <-*bus:
                 if !ok {
                     log.Print("worker could not read from closed channel")
                     log.Print("attempting to gracefully shutdown...")
-                    *quit<-struct{}{}
+                    *quit<-true
                 }
-                rawMsg, err := msg.Bytes()
-                if err != nil {
-                    log.Printf("worker could not unmarshal recieved message: %s", err)
-                    continue
+
+                var payload []byte
+                
+                switch w.(type) {
+                    case *os.File:
+                        payload = msg.BytesF()
+                    case *net.TCPConn:
+                        rawMsg, err := msg.Bytes()
+                        if err != nil {
+                            log.Printf("worker could not unmarshal recieved message: %s", err)
+                            continue
+                        }
+                        payload = rawMsg
                 }
-                 
+
                 // TODO: Perhaps we should treat this as a transient error
-                log.Printf("worker: writing message to %T", w)
-                if _, err := w.Write(rawMsg); err != nil {
+                if _, err := w.Write(payload); err != nil {
                     log.Printf("could not write to %T: %s", w, err)
                 }
-            case <- *quit:
-                log.Print("worker returning...")
+
+            case <-*quit:
                 return
         }
     }
@@ -224,16 +221,7 @@ func writer(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit 
 Send a messageTypeBye message to the server, letting it know that the client will terminate the connection
 */
 func (c *chatService) close(user string) {
-    c.quit <- struct{}{}
-    // Send a bye type message to the server
-    byeMsg, err := newRawSystemMsg(user, msgTypeBye)
-    if err != nil {
-        log.Print(err)
-    }
-    log.Print("Sending bye to server")
-    c.conn.Write(byeMsg)
-
-    log.Print("Closing connection...")
+    close(*c.quit)
     // Terminate the connection and service instance
 	c.conn.Close()
 }
