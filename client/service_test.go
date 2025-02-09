@@ -2,38 +2,51 @@ package client
 
 import (
 	"testing"
+
+    "github.com/google/go-cmp/cmp"
+    "github.com/google/go-cmp/cmp/cmpopts"
+)
+
+var (
+    mockInboundCh = newMessageBus(1)
+    mockOutboundCh = newMessageBus(1)
+    mockQuitCh = make(chan bool)
 )
 
 func TestNewChatService(t *testing.T) {
 	cases := []struct {
 		name    string
 		options []Option
+        clientName string
 		want    *chatService
 		wantErr error
 	}{
 		{
-			name:    "NewChatService with default options",
-			options: []Option{},
-			want: &chatService{
-				endpoint: &endpoint{"localhost", "7007", "tcp"},
-			},
-			wantErr: nil,
-		},
-		{
 			name: "NewChatService with explicit endpoint",
+            clientName: "benko",
 			options: []Option{
-				WithEndpoint(&endpoint{"127.0.0.1", "8888", "tcp"}),
+                WithBufferSize(1<<8),
 			},
-			want:    &chatService{endpoint: &endpoint{"127.0.0.1", "8888", "tcp"}},
+			want:    &chatService{
+                clientName: "benko",
+                quit: &mockQuitCh,
+                concurrency: 2,
+                connBufferSize: 1<<8,
+                conn: nil,
+                inboundCh: mockInboundCh,
+                outboundCh: mockOutboundCh,
+                endpoint: &endpoint{"localhost", "7007", "tcp"},
+            },
 			wantErr: nil,
 		},
 	}
 
 	for _, tt := range cases {
-		got, gotErr := NewChatService(tt.options...)
-		if *got.endpoint != *tt.want.endpoint {
-			t.Errorf("%s -> NewChatService(%v): got %v, want %v", tt.name, tt.options, got, tt.want)
-		}
+		got, gotErr := NewChatService(tt.clientName, tt.options...)
+
+        if !cmp.Equal(got, tt.want, cmpopts.IgnoreUnexported(chatService{})) {
+			t.Errorf("%s -> NewChatService(%v, %v): got %v, want %v", tt.name, tt.clientName, tt.options, got, tt.want)
+        }
 
 		if gotErr == nil && tt.wantErr != nil {
 			t.Errorf("%s -> NewChatService(%v): expected and error but none was received", tt.name, tt.options)

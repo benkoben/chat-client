@@ -21,8 +21,8 @@ const (
 )
 
 type chatService struct {
-	net.Dialer
 	endpoint       *endpoint
+    clientName     string
 	conn           net.Conn
 	connBufferSize int
     concurrency    int
@@ -32,11 +32,16 @@ type chatService struct {
 	quit        *chan bool // Entrypoint from client to chatService SIGTERM or SIGINT signals are received
 }
 
+// func (c chatService)String()string {
+//     return fmt.Sprintf("endpoint: %v, clientName %s, conn %v, connBufferSize %d, concurrency %d, inboundCh %v, outboundCh %v, quit %v", c.endpoint, c.clientName, c.conn, c.connBufferSize, c.concurrency, c.inboundCh, c.outboundCh, c.quit)
+// }
+
 type Option func(*chatService)
 
-func NewChatService(options ...Option) (*chatService, error) {
+func NewChatService(clientName string, options ...Option) (*chatService, error) {
     quit := make(chan bool)
 	svc := chatService{
+        clientName: clientName,
         quit: &quit,
         concurrency: defaultConcurrency,
         connBufferSize: defaultConnBufferSize,
@@ -62,15 +67,15 @@ func NewChatService(options ...Option) (*chatService, error) {
 connect establishes a connection with endpoint and returns an error if unsuccessful.
 if successful the connection is saved to the chatService.Connections instance
 */
-func (c *chatService) connect(user string) error {
-	conn, err := c.Dialer.Dial(c.endpoint.protocol, c.endpoint.String())
+func (c *chatService) Connect(dialer net.Dialer) error {
+	conn, err := dialer.Dial(c.endpoint.protocol, c.endpoint.String())
 	if err != nil {
 		return fmt.Errorf("could not connect to %s://%s: %s", c.endpoint.protocol, c.endpoint.String(), err)
 	}
 
-    helloMsg := newRawHelloMsg(user)
+    helloMsg := newRawHelloMsg(c.clientName)
     if _, err := conn.Write(helloMsg); err != nil {
-        return fmt.Errorf("could not send hello message:", err)
+        return fmt.Errorf("could not send hello message: %s", err)
     }
 
     buffer := make([]byte, c.connBufferSize) 
@@ -100,7 +105,7 @@ workers that write to destinations are dispatched according to c.concurrency.
 start also owns the responsibility of closing all channels once all go rountes have returned. This should only happen
 when quit is signalled.
 */
-func (c chatService) start(username string) {
+func (c chatService) Start() {
     wg := sync.WaitGroup{}
 
     defer close(*c.inboundCh)
@@ -156,7 +161,7 @@ func (c chatService) start(username string) {
                     if err != nil {
                         log.Printf("could not read from %v: %s", os.Stdin, err)
                     }
-                    m := newMsg(username, strings.TrimSuffix(string(chunk[:n]), "\n"))
+                    m := newMsg(c.clientName, strings.TrimSuffix(string(chunk[:n]), "\n"))
                     *c.outboundCh <- m
             }
         }
@@ -165,18 +170,27 @@ func (c chatService) start(username string) {
     // Reads from outbound channel and writes to net.Conn
     for i:=0;i<c.concurrency;i++ {
         wg.Add(1)
-        go worker(username, c.outboundCh, c.conn, &wg, c.quit)
+        go worker(c.clientName, c.outboundCh, c.conn, &wg, c.quit)
     }
 
     // Reads from inbound channel and writes to os.Stdout
     for i:=0;i<c.concurrency;i++ {
         wg.Add(1)
-        go worker(username, c.inboundCh, os.Stdout, &wg, c.quit)
+        go worker(c.clientName, c.inboundCh, os.Stdout, &wg, c.quit)
     }
 
     fmt.Println("Connected!")
     fmt.Println()
     wg.Wait()
+}
+
+/*
+Send a messageTypeBye message to the server, letting it know that the client will terminate the connection
+*/
+func (c chatService) Close() {
+    close(*c.quit)
+    // Terminate the connection and service instance
+	c.conn.Close()
 }
 
 func worker(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit *chan bool) {
@@ -215,14 +229,6 @@ func worker(name string, bus *messageBus, w io.Writer, wg *sync.WaitGroup, quit 
     }
 }
 
-/*
-Send a messageTypeBye message to the server, letting it know that the client will terminate the connection
-*/
-func (c *chatService) close(user string) {
-    close(*c.quit)
-    // Terminate the connection and service instance
-	c.conn.Close()
-}
 
 func WithEndpoint(endpoint *endpoint) Option {
 	return func(cs *chatService) {

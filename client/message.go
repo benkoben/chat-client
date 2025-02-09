@@ -117,7 +117,7 @@ func unmarshalMessage(data []byte) (*Message, error) {
    var msg Message
    err := json.Unmarshal(data, &msg) 
    if err != nil {
-       return nil, fmt.Errorf("message: could not unmarshal data", err)
+       return nil, fmt.Errorf("message: could not unmarshal data: %s", err)
    }
 
    return &msg, nil

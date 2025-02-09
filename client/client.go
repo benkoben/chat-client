@@ -5,40 +5,30 @@ import (
     "os" 
     "os/signal"
 	"syscall"
+    "errors"
+    "net"
 )
 
-/*
-   Client primarily does two things 1. Reads user input, adds metadata to them and sends it to the server
-   2. Reads service events and presents that to the user
-*/
-
-const (
-	defaultServer = "localhost"
-	defaultPort   = "7007"
-)
+type ChatService interface {
+    Connect(net.Dialer) error
+    Start()
+    Close()
+}
 
 type client struct {
 	name string 
-    svc  *chatService
+    svc  ChatService
 }
 
-type ClientSvcOptions struct {
-	MessageSize int
-}
+func NewClient(username string, service ChatService) (*client, error) {
 
-func NewClient(username, server, port string) (*client, error) {
+    if service == nil {
+        return nil, errors.New("service cannot be nil")
+    }
 
-	// Initialize service
-	endpointOpts := &EndpointOptions{Server: server, Port: port}
-	endpoint := NewEndpoint(endpointOpts)
-	service, err := NewChatService(
-		WithEndpoint(&endpoint),
-		WithBufferSize(1<<10),
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("could not initialize service: %s", err)
-	}
+    if username == "" {
+        return nil, errors.New("username cannot be nil")
+    }
 
 	return &client{
 		name: username,
@@ -51,11 +41,11 @@ func (c client) Start() error {
 	// and writes the received data to the serviceChannel
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    dialer := net.Dialer{}
 
 	defer close(quit)
 
-	fmt.Println("Connecting to", c.svc.endpoint)
-	if err := c.svc.connect(c.name); err != nil {
+	if err := c.svc.Connect(dialer); err != nil {
 		return err
 	}
     
@@ -64,14 +54,14 @@ func (c client) Start() error {
         for {
             select {
                 case <-quit:
-                    c.svc.close(c.name)
+                    c.svc.Close()
                     return
             }
         }
     }()
     
     // start service
-    c.svc.start(c.name)
+    c.svc.Start()
 
     fmt.Println("Goodbye", c.name)
 
