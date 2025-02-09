@@ -1,8 +1,6 @@
 package client
 
 // TOOD:
-// - Fix bux where quit signalling does not properly work
-// - Fix bug where inbound network connections are not written to stdout
 // - Add timeouts to connections (server side), or perhaps a keepalive mechanism to determine wether or not a connection is active
 
 import (
@@ -17,9 +15,9 @@ import (
 )
 
 const (
-    defaultConcurrency       = 2
-    defaultConnBufferSize    = 1<<10
-    defaultChannelBufferSize = 20
+    defaultConcurrency       = 2     // Amount of workers (inbound*n + outbound*n = min(2)) spawned
+    defaultConnBufferSize    = 1<<10 // How large an incoming or outbound message can be
+    defaultChannelBufferSize = 5     // The unhandled messages that can be buffered
 )
 
 type chatService struct {
