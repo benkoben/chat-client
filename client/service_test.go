@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+    "net"
 
     "github.com/google/go-cmp/cmp"
     "github.com/google/go-cmp/cmp/cmpopts"
@@ -52,4 +53,31 @@ func TestNewChatService(t *testing.T) {
 			t.Errorf("%s -> NewChatService(%v): expected and error but none was received", tt.name, tt.options)
 		}
 	}
+}
+
+func TestConnect(t *testing.T) {
+    cases := []struct{
+        name string
+        chatService chatService
+        host string
+        port string
+        want string
+    }{
+        {
+            name: "connect to server",
+			chatService: chatService{
+                clientName: "benko",
+                quit: &mockQuitCh,
+                concurrency: 2,
+                connBufferSize: 1<<8,
+                conn: nil,
+                inboundCh: mockInboundCh,
+                outboundCh: mockOutboundCh,
+                endpoint: &endpoint{"localhost", "7007", "tcp"},
+            },
+            
+        }
+    }
+
+
 }
