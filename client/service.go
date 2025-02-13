@@ -1,5 +1,4 @@
 package client
-
 // TOOD:
 // - Add timeouts to connections (server side), or perhaps a keepalive mechanism to determine wether or not a connection is active
 
@@ -19,6 +18,11 @@ const (
     defaultConnBufferSize    = 1<<10 // How large an incoming or outbound message can be
     defaultChannelBufferSize = 5     // The unhandled messages that can be buffered
 )
+
+// Allows us to use dependency injection for testing
+type Dialer interface{
+    Dial(network, address string) (net.Conn, error)
+}
 
 type chatService struct {
 	endpoint       *endpoint
@@ -73,12 +77,24 @@ func (c *chatService) Connect(dialer net.Dialer) error {
 		return fmt.Errorf("could not connect to %s://%s: %s", c.endpoint.protocol, c.endpoint.String(), err)
 	}
 
-    helloMsg := newRawHelloMsg(c.clientName)
+    if err := handshake(c.clientName, conn); err != nil {
+        return fmt.Errorf("could not perform handshake: %s", err) 
+    } else {
+        c.conn = conn
+    }
+
+	return nil
+}
+
+func handshake(name string, conn net.Conn) error {
+    
+    helloMsg := newRawHelloMsg(name)
     if _, err := conn.Write(helloMsg); err != nil {
         return fmt.Errorf("could not send hello message: %s", err)
     }
 
-    buffer := make([]byte, c.connBufferSize) 
+    // Used to read returning HelloMessage
+    buffer := make([]byte, 1<<8)
 
     // TODO: We might have to implement a timeout here
     n, err := conn.Read(buffer)
@@ -88,13 +104,10 @@ func (c *chatService) Connect(dialer net.Dialer) error {
 
     ok, msgType := isHello(buffer[:n])
     if !ok {
-        return fmt.Errorf("could not perform handshake, expected hello type message but received %s type", msgType)
+        return fmt.Errorf("expected hello type message but received %s type", msgType)
     }
-
-    c.conn = conn
-
-	return nil
-}
+    return nil
+} 
 
 /*
 start acts as an entry point to all of the go routine dispatching logic.
